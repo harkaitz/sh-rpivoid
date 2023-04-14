@@ -1,0 +1,629 @@
+#!/bin/sh -e
+#L:  MIT License
+#L:
+#l:  Copyright (c) 2023 Harkaitz Agirre, harkaitz.aguirre@gmail.com
+#L:
+#L:  Permission is hereby granted, free of charge, to any person obtaining a copy
+#L:  of this software and associated documentation files (the "Software"), to deal
+#L:  in the Software without restriction, including without limitation the rights
+#L:  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+#L:  copies of the Software, and to permit persons to whom the Software is
+#L:  furnished to do so, subject to the following conditions:
+#L:
+#L:  The above copyright notice and this permission notice shall be included in all
+#L:  copies or substantial portions of the Software.
+#L:
+#L:  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+#L:  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+#L:  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+#L:  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+#L:  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+#L:  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+#L:  SOFTWARE.
+###:
+#h: Usage: $0 [-d DEV][-f] ...
+#h:
+#h: This script helps installing VOID Linux in a Raspberry PI. It
+#h: can burn an SDCARD, configure the network, enable SSH with
+#h: public key auth, change the password and install packages in
+#h: one single step.
+#h:
+#h: ... show                : Show configuration.
+#h: ... b-r{2,3,4}          : Burn SD Card.
+#h: ... all                 : Run all operations below.
+#h: ...   resize            : Open with cfdisk to resize partitions.
+#h: ...   install           : Install necessary scripts, set the hostname.
+#h: ...   password          : Change the root's password (by default random).
+#h: ...   sshcpy            : Install ssh keys.
+#h: ...   reconf            : Set hostname, wifi (if neeed).
+#h: ...   install-base      : Install basic software.
+#h: ... pkg-query   WORD    : Search packages for the raspberry.
+#h: ... pkg-install PKGS... : Install packages in the raspberry.
+#h: ... fsck                : Check file system.
+###:
+#h2: Usage: $0 [-f] ...
+#h2:
+#h2: This script helps configuring a VOID Linux system at launch in a raspberry PI.
+#h2:
+#h2: ... show            : Show configuration (readen from /boot/rpivoid.cfg).
+#h2: ... init            : Try running all operations below.
+#h2: ... connect-eth0    : Connect 'eth0' interface.
+#h2: ... connect-wlan0   : Connect 'wlan0' interface.
+#h2: ... setup-keyboard  : Setup the keyboard.
+#h2: ... setup-localtime : Setup the localtime.
+###:
+rpivoid() {
+    ## Parse options.
+    local OPTIND optopt=
+    while getopts "d:f" optopt; do # OPTARG
+          case $optopt in
+              d)  local RPIVOID_DEVICE="${OPTARG}" ;;
+              f)  local RPIVOID_FORCE=y;;
+              \?) return 1;;
+          esac
+    done
+    shift $(( $OPTIND - 1 ))
+    if test ! -n "${1}"; then
+        sed -n 's/^ *#h: \{0,1\}//p' "$0" | sed "s|\\\$0|`basename $0`|g"
+        echo ""
+        sed -n 's/^ *#l: \{0,2\}//p' "$0"
+        return 1
+    fi
+    ## Operations.
+    local cmd="$1"
+    shift
+    case "${cmd}" in
+        show)            rpivoid_show_variables            ;;
+        open-isos-web)   rpivoid_isos_web                  ;;
+        test)            rpivoid_search_iso 'void-rpi3-20' ;;
+        b-r2)            rpivoid_burn_r2 "$@"              ;;
+        b-r3)            rpivoid_burn_r3 "$@"              ;;
+        b-r4)            rpivoid_burn_r4 "$@"              ;;
+        all)             rpivoid resize
+                         rpivoid install
+                         rpivoid password
+                         rpivoid sshcpy
+                         rpivoid reconf
+                         if which xbps-install >/dev/null 2>&1; then
+                             rpivoid install-base
+                         else
+                             rpivoid_warning "Skipped upgrade, only supported on Void Linux host machines."
+                         fi
+                         rpivoid_info "FINISHED!";;
+        resize)          rpivoid_resize;;
+        install)         rpivoid_mount_run 1 config.txt '
+                             rpivoid_p1_fix_hdmi_bug
+                             rpivoid_p1_fix_audio_bug
+                             rpivoid_p1_rpivoid'
+                         rpivoid_mount_run 2 bin/sh '
+                             rpivoid_p2_setup_shell
+                             rpivoid_p2_rpivoid_rc
+                             rpivoid_p2_rpivoid_bin
+                             rpivoid_p2_enable_ssh
+                             rpivoid_p2_enable_ntpd
+                             rpivoid_p2_set_root_shell_to_bash
+                             rpivoid_p2_hostname';;
+        password)        rpivoid_mount_run 2 bin/sh '
+                             rpivoid_p2_change_password';;
+        sshcpy)          rpivoid_mount_run 2 bin/sh '
+                             rpivoid_p2_install_ssh_public_key';;
+        reconf)          rpivoid_p1_reconf;;
+        install-base)    rpivoid_pkg_install_base ;;
+        pkg-query)       rpivoid_pkg_query   "$@" ;;
+        pkg-install)     rpivoid_pkg_install "$@" ;;
+        fsck)            rpivoid_fsck        "$@" ;;
+        connect-eth0)    rpivoid_connect_eth0     ;;
+        connect-wlan0)   rpivoid_connect_wlan0    ;;
+        setup-keyboard)  rpivoid_setup_keyboard   ;;
+        setup-localtime) rpivoid_setup_localtime  ;;
+        init)            if test -n "${RPIVOID_NET_WIFI_SSID}"; then
+                             rpivoid_connect_wlan0 || true
+                         elif test -n "${RPIVOID_NET_IPADDR}"; then
+                             rpivoid_connect_eth0  || true
+                         fi
+                         if test -n "${RPIVOID_KEYBOARD}"; then
+                             rpivoid_setup_keyboard || true
+                         fi
+                         if test -n "${RPIVOID_TIMEZONE}"; then
+                             rpivoid_setup_localtime || true
+                         fi;;
+        *)               rpivoid_error "Invalid operation: ${cmd}."
+                         return 1;;
+    esac
+}
+rpivoid_show_variables() {
+    cat <<-EOF
+	RPIVOID_SCRIPT         : ${RPIVOID_SCRIPT}
+	RPIVOID_FORCE          : ${RPIVOID_FORCE}
+	RPIVOID_MIRROR         : ${RPIVOID_MIRROR}
+	RPIVOID_MOUNT          : ${RPIVOID_MOUNT}
+	RPIVOID_TMPDIR         ; ${RPIVOID_TMPDIR}
+	RPIVOID_NET_IPADDR     : ${RPIVOID_NET_IPADDR}
+	RPIVOID_NET_GATEWAY    : ${RPIVOID_NET_GATEWAY}
+	RPIVOID_NET_DNS1       : ${RPIVOID_NET_DNS1}
+	RPIVOID_NET_DNS2       : ${RPIVOID_NET_DNS2}
+	RPIVOID_NET_WIFI_SSID  : ${RPIVOID_NET_WIFI_SSID}
+	RPIVOID_NET_WIFI_PASS  : ${RPIVOID_NET_WIFI_PASS}
+	RPIVOID_PASSWORD       : ${RPIVOID_PASSWORD:-RANDOM}
+	RPIVOID_SSH_PUBKEY     : ${RPIVOID_SSH_PUBKEY}
+	EOF
+}
+rpivoid_calc_variables() {
+    RPIVOID_SCRIPT="$0"
+    RPIVOID_MIRROR="https://alpha.de.repo.voidlinux.org/live/20210930/"
+    RPIVOID_DEVICE=""
+    RPIVOID_TMPDIR="/tmp/rpivoid-`whoami`"
+    RPIVOID_MOUNT="/mnt/rpivoid"
+    RPIVOID_NET_DNS1="${RPIVOID_NET_DNS1:-8.8.8.8}"
+    RPIVOID_NET_DNS2="${RPIVOID_NET_DNS2:-8.8.4.4}"
+    RPIVOID_KEYBOARD="${RPIVOID_KEYBOARD:-$(setxkbmap -query | sed -n 's|^layout: *||p')}"
+    RPIVOID_TIMEZONE="${RPIVOID_TIMEZONE:-$(timedatectl | sed -n 's|^\s*Time zone: *\([^ ][^ ]*\).*|\1|p')}"
+    RPIVOID_PASSWORD="${RPIVOID_PASSWORD:-}"
+    RPIVOID_SSH_PUBKEY="${RPIVOID_SSH_PUBKEY:-${HOME}/.ssh/id_rsa.pub}"
+    export PATH="${PATH}:/sbin:/usr/sbin"
+}
+rpivoid_check_programs() {
+    local ret=0 cmd=
+    for cmd in curl sudo xzcat cfdisk e2fsck resize2fs base64 openssl fsck fsck.fat e2fsck makepasswd; do
+        if ! which "$cmd" >/dev/null 2>&1; then
+            rpivoid_error "Command '$cmd' not available."
+            ret=1
+        fi
+    done
+    if test @"$ret" = @"1"; then
+        if which apt-get >/dev/null 2>&1; then
+            echo "Run: sudo apt-get install fdisk e2fsprogs makepasswd"
+        fi
+    fi
+    return "${ret}"
+}
+## -------------------------------------------------------------------
+rpivoid_get_xz_filename() {
+    curl -s "${RPIVOID_MIRROR}" | sed -n '
+    s|^<a  *href="\([^"]*'"${1}"'[^"]*\.img\.xz\)".*|\1|p
+    '
+}
+rpivoid_get_RPIVOID_XZFILE() { # REGEX
+    if test ! -n "${RPIVOID_XZFILE}"; then
+        local xz_regex="$1"
+        local xz_name="`rpivoid_get_xz_filename "${xz_regex}"`"
+        local xz_url="${RPIVOID_MIRROR}/${xz_name}"
+        local xz_file="${RPIVOID_TMPDIR}/${xz_name}"
+        if test ! -n "${xz_name}"; then
+            rpivoid_error "Can't find an iso matching '${xz_regex}' in voidlinux repo."
+            return 1
+        fi
+        if test ! -f "${xz_file}"; then
+            rpivoid_info "Downloading ${xz_url} ..."
+            mkdir -p "`dirname "${xz_file}"`"       >&2
+            curl -s -o "${xz_file}.tmp" "${xz_url}" >&2
+            mv "${xz_file}.tmp" "${xz_file}"        >&2
+        fi
+        RPIVOID_XZFILE="${xz_file}"
+    fi
+}
+rpivoid_get_RPIVOID_DEVICE() {
+    if test ! -n "${RPIVOID_DEVICE}"; then
+        rpivoid_error "Please specify a device with -d."
+        return 1
+    fi
+    if test ! -b "${RPIVOID_DEVICE}"; then
+        rpivoid_error "Path ${RPIVOID_DEVICE} doesn't point to a block device."
+        return 1
+    fi
+}
+rpivoid_burn() { # DEVICE XZFILE
+    if test ! -n "${RPIVOID_FORCE}"; then
+        echo "This will remove everything in ${1}. Enter to continue." >&2
+        read ign
+    fi
+    sudo device="${1}" iso="${2}" SCRNAME="${SCRNAME}" sh -c '
+    echo "${SCRNAME}: Burning ${iso} to ${device} ..." >&2
+    xzcat "${iso}" | dd bs=4M if=/dev/stdin of="${device}"
+    echo "Syncing ..."
+    sudo sync
+    '
+}
+rpivoid_mount_run() { # PART CHKFILE COMMAND...
+    rpivoid_get_RPIVOID_DEVICE
+    if test ! -n "${1}";then
+        rpivoid_error "Please specify a part number."
+        return 1
+    elif test ! -n "${2}";then
+        rpivoid_error "Please specify a check file."
+        return 1
+    fi
+    local chk="$2" pwd="`pwd`"
+    case "${RPIVOID_DEVICE}" in
+        */mmc*) local part="p$1" ;;
+        *)      local part="$1"  ;;
+    esac
+    shift 2
+    if test ! -e "${RPIVOID_MOUNT}/${chk}";then
+        rpivoid_info "Mounting ${RPIVOID_DEVICE}${part} in ${RPIVOID_MOUNT} ..."
+        sudo mkdir -p "${RPIVOID_MOUNT}"
+        sudo umount "${RPIVOID_MOUNT}" >/dev/null 2>&1 || true
+        sudo mount "${RPIVOID_DEVICE}${part}" "${RPIVOID_MOUNT}"
+    fi
+    if test ! -e "${RPIVOID_MOUNT}/${chk}";then
+        rpivoid_info "Umounting ${RPIVOID_MOUNT} ..."
+        sudo umount "${RPIVOID_MOUNT}"
+        rpivoid_error "The device seems to not contain a VOID Linux installation."
+        return 1
+    fi
+    cd "${RPIVOID_MOUNT}"
+    if eval "$*";then
+        local retval=0
+    else
+        local retval=1
+    fi
+    cd "${pwd}"
+    rpivoid_info "Umounting ${RPIVOID_MOUNT} ..."
+    sudo umount "${RPIVOID_MOUNT}"
+    return "${retval}"
+}
+## -----------------------------------------------------------------------------
+rpivoid_burn_r2() {
+    rpivoid_check_programs
+    rpivoid_get_RPIVOID_XZFILE 'void-rpi2-20'
+    rpivoid_get_RPIVOID_DEVICE
+    rpivoid_burn "${RPIVOID_DEVICE}" "${RPIVOID_XZFILE}"
+}
+rpivoid_burn_r3() {
+    rpivoid_check_programs
+    rpivoid_get_RPIVOID_XZFILE 'void-rpi3-20'
+    rpivoid_get_RPIVOID_DEVICE
+    rpivoid_burn "${RPIVOID_DEVICE}" "${RPIVOID_XZFILE}"
+}
+rpivoid_burn_r4() {
+    rpivoid_check_programs
+    rpivoid_get_RPIVOID_XZFILE 'void-rpi4-20'
+    rpivoid_get_RPIVOID_DEVICE
+    rpivoid_burn "${RPIVOID_DEVICE}" "${RPIVOID_XZFILE}"
+}
+rpivoid_fsck() {
+    rpivoid_check_programs
+    rpivoid_get_RPIVOID_DEVICE
+    sudo fsck "${RPIVOID_DEVICE}"1 || true
+    sudo fsck "${RPIVOID_DEVICE}"2 || true
+}
+rpivoid_resize() {
+    rpivoid_check_programs
+    rpivoid_get_RPIVOID_DEVICE
+    sudo true
+    local b1="`sudo head -c 512 "${RPIVOID_DEVICE}" | base64`"
+    sudo cfdisk "${RPIVOID_DEVICE}"
+    local b2="`sudo head -c 512 "${RPIVOID_DEVICE}" | base64`"
+    if test ! @"${b1}" = @"${b2}"; then
+        case "${RPIVOID_DEVICE}" in
+            */mmc*)
+                rpivoid_info "Resizing ${RPIVOID_DEVICE}p2 ..."
+                sudo e2fsck -f "${RPIVOID_DEVICE}"p2
+                sudo resize2fs "${RPIVOID_DEVICE}"p2
+                ;;
+            *)
+                rpivoid_info "Resizing ${RPIVOID_DEVICE}2 ..."
+                sudo e2fsck -f "${RPIVOID_DEVICE}"2
+                sudo resize2fs "${RPIVOID_DEVICE}"2
+                ;;
+        esac
+    else
+        rpivoid_info "No resizing needed."
+        echo "No changes to partitioning."
+    fi
+}
+rpivoid_p1_fix_hdmi_bug() {
+    rpivoid_info "-- Fixing HDMI bug [/boot/config.txt] ..."
+    sudo sed -i'.tmp' 's|.*hdmi_force_hotplug=.*|hdmi_force_hotplug=1|' config.txt
+    sudo rm -f config.txt.tmp
+}
+rpivoid_p1_fix_audio_bug() {
+    rpivoid_info "-- Activating audio [/boot/config.txt] ..."
+    sudo sed -i'.tmp' '/dtparam/s|^\#*||' config.txt
+    sudo rm -f config.txt.tmp
+}
+rpivoid_p1_rpivoid() {
+    rpivoid_info "-- Creating rpivoid init script directory [/boot/rpivoid/] ..."
+    sudo mkdir -p rpivoid
+}
+rpivoid_p2_rpivoid_rc() {
+    rpivoid_info "-- Adding code for rpivoid init directory [/etc/rc.local] ..."
+    sudo sed -i '/-- rpivoid --/,/-- rpivoid --/d' etc/rc.local
+    sudo tee -a etc/rc.local <<-EOF >/dev/null
+	## -- rpivoid --
+	if test -d /boot/rpivoid;then
+	    for s in \`find /boot/rpivoid -iregex ".*.sh" | sort\`;do
+	        date >> "\${s}.log"
+	        sh -e "\${s}" >> "\${s}.log" 2>&1 || true
+	    done
+	fi
+	## -- rpivoid --
+	EOF
+}
+rpivoid_p2_rpivoid_bin() {
+    rpivoid_info "-- Installing rpivoid script [/usr/local/bin/rpivoid-h] ..."
+    sudo cp "${RPIVOID_SCRIPT}" "usr/local/bin/rpivoid-h"
+}
+rpivoid_p2_hostname() {
+    rpivoid_info "-- Setting hostname [/etc/hostname] ..."
+    local hostname=
+    echo -n "${SCRNAME}: -- Specify the hostname [`cat etc/hostname`]> " >&2
+    read hostname
+    if test -n "${hostname}";then
+        echo "${hostname}" | sudo tee etc/hostname >/dev/null
+    fi
+}
+rpivoid_p2_enable_ssh() {
+    rpivoid_info "-- Enabling SSHD [/etc/runit/runsvdir/default/sshd] ..."
+    if test ! -e etc/runit/runsvdir/default/sshd;then
+        sudo ln -s /etc/sv/sshd etc/runit/runsvdir/default/sshd
+    fi
+}
+rpivoid_p2_enable_ntpd() {
+    if test -d etc/sv/ntpd;then
+        rpivoid_info "-- Enabling NTPD [/etc/runit/runsvdir/default/ntpd] ..."
+        sudo sed -i".bk" 's|-\([ogu]\) chrony|-\1 root|g' etc/sv/ntpd/run
+        sudo rm -f etc/sv/ntpd/run.bk
+        if test ! -e etc/runit/runsvdir/default/ntpd;then
+            sudo ln -s /etc/sv/ntpd etc/runit/runsvdir/default/ntpd
+        fi
+    fi
+}
+rpivoid_p2_setup_shell() {
+    rpivoid_info "-- Setting PS1,PS2,TERM in [/etc/profile.d/ps1.sh] ..."
+    sudo tee etc/profile.d/ps1.sh <<-EOF >/dev/null
+	export PS1='# '
+	export PS2='## '
+	export TERM='xterm' # ST bug: Working terminal not supported.
+	EOF
+}
+rpivoid_p2_set_root_shell_to_bash() {
+    rpivoid_info "-- Changing the root's shell in [/etc/passwd] ..."
+    sudo sed -i'.tmp' 's|:/bin/sh$|:/bin/bash|' etc/passwd
+    sudo rm -f etc/passwd.tmp
+}
+rpivoid_p1_reconf() {
+    local choice= ans= cfg=
+    rpivoid_mount_run 1 rpivoid '
+    if test -f rpivoid.cfg;then
+        echo "Reading rpivoid.cfg ..."
+        . ./rpivoid.cfg
+    fi
+    '
+    echo    "-- How do you want to connect to internet?"   >&2
+    echo    "-- "                                          >&2
+    echo    "-- 1 : Using the Wifi device.     [RPI3,4]"   >&2
+    echo    "-- 2 : Using the Ethernet device. [RPI2,3,4]" >&2
+    echo    "-- N : Do not connect to internet."           >&2
+    echo    "-- "                                          >&2
+    echo -n "-- Choice: "                                  >&2
+    read choice
+    case "${choice}" in
+        1)   echo -n "-- Wifi SSID [${RPIVOID_NET_WIFI_SSID}]: "
+             read ans
+             if test -n "${ans}";then RPIVOID_NET_WIFI_SSID="${ans}"; fi
+             echo -n "-- Wifi password [${RPIVOID_NET_WIFI_PASS}]: "
+             read ans
+             if test -n "${ans}";then RPIVOID_NET_WIFI_PASS="${ans}"; fi
+             ;;
+    esac
+    case "${choice}" in
+        1|2) echo -n "-- IP Address [${RPIVOID_NET_IPADDR}]: "
+             read ans
+             if test -n "${ans}";then RPIVOID_NET_IPADDR="${ans}"; fi
+             echo -n "-- Gateway IP address [${RPIVOID_NET_GATEWAY}]: "
+             read ans
+             if test -n "${ans}";then RPIVOID_NET_GATEWAY="${ans}"; fi
+             echo -n "-- Nameserver 1 [${RPIVOID_NET_DNS1}]: "
+             read ans
+             if test -n "${ans}";then RPIVOID_NET_DNS1="${ans}"; fi
+             echo -n "-- Nameserver 2 [${RPIVOID_NET_DNS2}]: "
+             read ans
+             if test -n "${ans}";then RPIVOID_NET_DNS2="${ans}"; fi
+             ;;     
+    esac
+    case "${choice}" in
+        1) rpivoid_connect_wlan0_chk || return 1
+           cat > /tmp/rpivoid.cfg.new <<-EOF
+		RPIVOID_NET_WIFI_SSID='${RPIVOID_NET_WIFI_SSID}'
+		RPIVOID_NET_WIFI_PASS='${RPIVOID_NET_WIFI_PASS}'
+		RPIVOID_NET_IPADDR='${RPIVOID_NET_IPADDR}'
+		RPIVOID_NET_GATEWAY='${RPIVOID_NET_GATEWAY}'
+		RPIVOID_NET_DNS1='${RPIVOID_NET_DNS1}'
+		RPIVOID_NET_DNS2='${RPIVOID_NET_DNS2}'
+		EOF
+           ;;
+        2) rpivoid_connect_eth0_chk || return 1
+           cat > /tmp/rpivoid.cfg.new <<-EOF
+		RPIVOID_NET_IPADDR='${RPIVOID_NET_IPADDR}'
+		RPIVOID_NET_GATEWAY='${RPIVOID_NET_GATEWAY}'
+		RPIVOID_NET_DNS1='${RPIVOID_NET_DNS1}'
+		RPIVOID_NET_DNS2='${RPIVOID_NET_DNS2}'
+		EOF
+           ;;
+        *) echo -n > /tmp/rpivoid.cfg.new
+           ;;
+    esac
+    echo -n "-- Type the keyboard layout [${RPIVOID_KEYBOARD}]: "
+    read ans
+    if test -n "${ans}";then RPIVOID_KEYBOARD="${ans}"; fi
+    rpivoid_setup_keyboard_chk || return 1
+    cat >> /tmp/rpivoid.cfg.new <<-EOF
+	RPIVOID_KEYBOARD='${RPIVOID_KEYBOARD}'
+	EOF
+    echo -n "-- Type the localtime [${RPIVOID_TIMEZONE}]: "
+    read ans
+    if test -n "${ans}";then RPIVOID_TIMEZONE="${ans}"; fi
+    rpivoid_setup_localtime_chk || return 1
+    cat >> /tmp/rpivoid.cfg.new <<-EOF
+	RPIVOID_TIMEZONE='${RPIVOID_TIMEZONE}'
+	EOF
+    echo "========================================================="
+    cat /tmp/rpivoid.cfg.new
+    echo "========================================================="
+    echo -n "-- Is this okey? y/N: "
+    read ans
+    if test @"${ans}" = @"y";then
+        rpivoid_mount_run 1 config.txt '
+        echo "-- Writting rpivoid.cfg ..."
+        sudo cp /tmp/rpivoid.cfg.new rpivoid.cfg
+        echo "-- Creating rpivoid/aa-rpivoid.sh ..."
+	echo "/usr/local/bin/rpivoid-h init || true" | sudo tee rpivoid/aa-rpivoid.sh >/dev/null
+        '
+    fi
+}
+rpivoid_pkg_query() { # ARGS...
+    rpivoid_mount_run 2 bin/sh "xbps-query -r \`pwd\` -Rs $*"
+}
+rpivoid_pkg_install() {
+    rpivoid_mount_run 2 bin/sh "sudo xbps-install -r \`pwd\` -yRs $*"
+}
+rpivoid_pkg_install_base() {
+    rpivoid_mount_run 2 bin/sh "
+    sudo xbps-install -r \`pwd\` -ySu
+    sudo xbps-install -r \`pwd\` -yRs mg
+    if test ! -e etc/runit/runsvdir/default/socklog-unix;then
+        sudo ln -vs /etc/sv/socklog-unix etc/runit/runsvdir/default/
+    fi
+    if test ! -e etc/runit/runsvdir/default/;then
+        sudo ln -vs /etc/sv/nanoklogd    etc/runit/runsvdir/default/
+    fi
+    "
+}
+## -------------------------------------------------------------------
+rpivoid_p2_install_ssh_public_key() {
+    rpivoid_info "-- Installing SSH public key in [PART2:/root/.ssh/authorized_keys] ..."
+    if test ! -f "${RPIVOID_SSH_PUBKEY}";then
+        rpivoid_error "You do not have a public SSH key in '${RPIVOID_SSH_PUBKEY}'."
+        return 1
+    fi
+    sudo mkdir -p root/.ssh
+    sudo cp ${RPIVOID_SSH_PUBKEY} root/.ssh/authorized_keys
+    sudo chmod -R 0600 root/.ssh
+}
+rpivoid_p2_change_password() {
+    rpivoid_check_programs
+    if test -n "${RPIVOID_PASSWORD}"; then
+        rpivoid_info "-- Setting password for root ... [/etc/shadow]"
+        local pass1="${RPIVOID_PASSWORD}"
+    else
+        rpivoid_info "-- Setting random password for root ... [/etc/shadow]"
+        local pass1="`makepasswd`"
+        if test ! -n "${pass1}"; then return 1; fi
+        rpivoid_info "-- The password is ${pass1}"
+    fi
+    local pass="`openssl passwd -1 -salt root "${pass1}"`"
+    if test ! -n "${pass}";then return 1; fi
+    sudo sed -i'.tmp' "s|^root:.*|root:${pass}:17764:0:99999:7:::|g" etc/shadow
+    sudo rm -f etc/shadow.tmp
+}
+## -------------------------------------------------------------------
+rpivoid_connect_eth0_chk() {
+    if test ! -n "${RPIVOID_NET_IPADDR}";then
+        rpivoid_error "/boot/rpivoid.cfg: Please specify RPIVOID_NET_IPADDR."
+        return 1
+    elif test ! -n "${RPIVOID_NET_GATEWAY}";then
+        rpivoid_error "/boot/rpivoid.cfg: Please specify RPIVOID_NET_GATEWAY."
+        return 1
+    fi
+}
+rpivoid_connect_eth0() {
+    rpivoid_connect_eth0_chk
+    if test ! @"`whoami`" = @"root";then
+        rpivoid_error "Please run as root."
+        return 1
+    fi
+    rpivoid_info "-- Connecting throw ethernet ..."
+    ip link set dev eth0 up
+    ip addr add "${RPIVOID_NET_IPADDR}"/24 brd + dev eth0
+    ip route add default via "${RPIVOID_NET_GATEWAY}"
+    cat > /etc/resolv.conf <<-EOF
+	nameserver ${RPIVOID_NET_DNS1:-8.8.8.8}
+	nameserver ${RPIVOID_NET_DNS1:-8.8.4.4}
+	EOF
+}
+rpivoid_connect_wlan0_chk() {
+    if test ! -n "${RPIVOID_NET_IPADDR}";then
+        rpivoid_error "/boot/rpivoid.cfg: Please specify RPIVOID_NET_IPADDR."
+        return 1
+    elif test ! -n "${RPIVOID_NET_GATEWAY}";then
+        rpivoid_error "/boot/rpivoid.cfg: Please specify RPIVOID_NET_GATEWAY."
+        return 1
+    elif test ! -n "${RPIVOID_NET_WIFI_SSID}";then
+        rpivoid_error "/boot/rpivoid.cfg: Please specify RPIVOID_NET_WIFI_SSID."
+        return 1
+    elif test ! -n "${RPIVOID_NET_WIFI_PASS}";then
+        rpivoid_error "/boot/rpivoid.cfg: Please specify RPIVOID_NET_WIFI_PASS."
+        return 1
+    fi
+}
+rpivoid_connect_wlan0() {
+    rpivoid_connect_wlan0_chk
+    if test ! @"`whoami`" = @"root";then
+        rpivoid_error "Please run as root."
+        return 1
+    fi
+    rpivoid_info "-- Connecting throw ${RPIVOID_NET_WIFI_SSID}..."
+    wpa_passphrase "${RPIVOID_NET_WIFI_SSID}" "${RPIVOID_NET_WIFI_PASS}" \
+                   > /etc/wpa_supplicant/wpa_supplicant-wlan0.conf
+    if test ! -e /etc/runit/runsvdir/default/wpa_supplicant;then
+        ln -s /etc/sv/wpa_supplicant /etc/runit/runsvdir/default
+    fi
+    ip link set dev wlan0 up
+    ip addr add "${RPIVOID_NET_IPADDR}/24" brd + dev wlan0
+    ip route add default via "${RPIVOID_NET_GATEWAY}"
+    cat > /etc/resolv.conf <<-EOF
+	nameserver ${RPIVOID_NET_DNS1:-8.8.8.8}
+	nameserver ${RPIVOID_NET_DNS1:-8.8.4.4}
+	EOF
+}
+rpivoid_setup_keyboard_chk() {
+    if test ! -n "${RPIVOID_KEYBOARD}";then
+        rpivoid_error "/boot/rpivoid.cfg: Please specify RPIVOID_KEYBOARD."
+        return 1
+    fi
+}
+rpivoid_setup_keyboard() {
+    rpivoid_setup_keyboard_chk
+    rpivoid_info "-- Setting keyboard to ${RPIVOID_KEYBOARD} ..."
+    loadkeys "${RPIVOID_KEYBOARD}"
+}
+rpivoid_setup_localtime_chk() {
+    if test ! -n "${RPIVOID_TIMEZONE}";then
+        rpivoid_error "/boot/rpivoid.cfg: Please specify the timezone in RPIVOID_TIMEZONE."
+        return 1
+    elif test ! -f "/usr/share/zoneinfo/${RPIVOID_TIMEZONE}";then
+        rpivoid_error "/boot/rpivoid.cfg: RPIVOID_TIMEZONE: Invalid timezone."
+        return 1
+    fi
+}
+rpivoid_setup_localtime() {
+    rpivoid_setup_localtime_chk
+    if test ! @"`whoami`" = @"root";then
+        rpivoid_error "Please run as root."
+        return 1
+    fi
+    rpivoid_info "-- Setting localtime to ${RPIVOID_TIMEZONE} ..."
+    rm -f "/etc/localtime"
+    ln -s "/usr/share/zoneinfo/${RPIVOID_TIMEZONE}" "/etc/localtime"
+}
+## -----------------------------------------------------------------------------
+SCRNAME="`basename "$0"`"
+rpivoid_calc_variables
+rpivoid_error()   { echo "${SCRNAME}: error: $*"   >&2; }
+rpivoid_warning() { echo "${SCRNAME}: warning: $*" >&2; }
+rpivoid_info()    { echo "${SCRNAME}: $*"          >&2; }
+if test @"${SCRNAME}" = @"rpivoid"; then
+    rpivoid "$@"
+elif test @"${SCRNAME}" = @"rpivoid-h"; then
+    if test -n "$1";then
+        if test -f /boot/rpivoid.cfg; then
+            . /boot/rpivoid.cfg
+        fi
+        rpivoid "$@"
+    else
+        sed -n 's/^ *#h2*: \{0,1\}//p' "$0" | sed "s|\\\$0|`basename $0`|g"
+        echo ""
+        sed -n 's/^ *#l: \{0,2\}//p' "$0"
+    fi
+fi
