@@ -21,7 +21,7 @@
 #L:  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 #L:  SOFTWARE.
 ###:
-#h: Usage: $0 [-d DEV][-f] ...
+#h: Usage: rpivoid [-d DEV][-f] ...
 #h:
 #h: This script helps installing VOID Linux in a Raspberry PI. It
 #h: can burn an SDCARD, configure the network, enable SSH with
