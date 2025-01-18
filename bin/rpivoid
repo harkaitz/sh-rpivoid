@@ -29,7 +29,7 @@
 #h: one single step.
 #h:
 #h: ... show                : Show configuration.
-#h: ... b-r{2,3,4}          : Burn SD Card.
+#h: ... b-r{2,3,4,5}        : Download [and burn with -d] SD Card.
 #h: ... all                 : Run all operations below.
 #h: ...   resize            : Open with cfdisk to resize partitions.
 #h: ...   install           : Install necessary scripts, set the hostname.
@@ -79,6 +79,7 @@ rpivoid() {
         b-r2)            rpivoid_burn_r2 "$@"              ;;
         b-r3)            rpivoid_burn_r3 "$@"              ;;
         b-r4)            rpivoid_burn_r4 "$@"              ;;
+        b-r5)            rpivoid_burn_r5 "$@"              ;;
         all)             rpivoid resize
                          rpivoid install
                          rpivoid password
@@ -94,6 +95,8 @@ rpivoid() {
         install)         rpivoid_mount_run 1 config.txt '
                              rpivoid_p1_fix_hdmi_bug
                              rpivoid_p1_fix_audio_bug
+                             rpivoid_p1_fix_os_check
+                             rpivoid_p1_fix_usbhid_bug
                              rpivoid_p1_rpivoid'
                          rpivoid_mount_run 2 bin/sh '
                              rpivoid_p2_setup_shell
@@ -101,6 +104,7 @@ rpivoid() {
                              rpivoid_p2_rpivoid_bin
                              rpivoid_p2_enable_ssh
                              rpivoid_p2_enable_ntpd
+                             rpivoid_p2_disable_fsck_emergency
                              rpivoid_p2_set_root_shell_to_bash
                              rpivoid_p2_hostname';;
         password)        rpivoid_mount_run 2 bin/sh '
@@ -126,7 +130,8 @@ rpivoid() {
                          fi
                          if test -n "${RPIVOID_TIMEZONE}"; then
                              rpivoid_setup_localtime || true
-                         fi;;
+                         fi
+                         ;;
         *)               rpivoid_error "Invalid operation: ${cmd}."
                          return 1;;
     esac
@@ -150,7 +155,7 @@ rpivoid_show_variables() {
 }
 rpivoid_calc_variables() {
     RPIVOID_SCRIPT="$0"
-    RPIVOID_MIRROR="https://alpha.de.repo.voidlinux.org/live/20210930/"
+    RPIVOID_MIRROR="https://repo-fi.voidlinux.org/live/20240314/"
     RPIVOID_DEVICE=""
     RPIVOID_TMPDIR="/tmp/rpivoid-`whoami`"
     RPIVOID_MOUNT="/mnt/rpivoid"
@@ -265,19 +270,25 @@ rpivoid_mount_run() { # PART CHKFILE COMMAND...
 ## -----------------------------------------------------------------------------
 rpivoid_burn_r2() {
     rpivoid_check_programs
-    rpivoid_get_RPIVOID_XZFILE 'void-rpi2-20'
+    rpivoid_get_RPIVOID_XZFILE 'void-rpi-armv7l-20'
     rpivoid_get_RPIVOID_DEVICE
     rpivoid_burn "${RPIVOID_DEVICE}" "${RPIVOID_XZFILE}"
 }
 rpivoid_burn_r3() {
     rpivoid_check_programs
-    rpivoid_get_RPIVOID_XZFILE 'void-rpi3-20'
+    rpivoid_get_RPIVOID_XZFILE 'void-rpi-aarch64-20'
     rpivoid_get_RPIVOID_DEVICE
     rpivoid_burn "${RPIVOID_DEVICE}" "${RPIVOID_XZFILE}"
 }
 rpivoid_burn_r4() {
     rpivoid_check_programs
-    rpivoid_get_RPIVOID_XZFILE 'void-rpi4-20'
+    rpivoid_get_RPIVOID_XZFILE 'void-rpi-aarch64-20'
+    rpivoid_get_RPIVOID_DEVICE
+    rpivoid_burn "${RPIVOID_DEVICE}" "${RPIVOID_XZFILE}"
+}
+rpivoid_burn_r5() {
+    rpivoid_check_programs
+    rpivoid_get_RPIVOID_XZFILE 'void-rpi-aarch64-20'
     rpivoid_get_RPIVOID_DEVICE
     rpivoid_burn "${RPIVOID_DEVICE}" "${RPIVOID_XZFILE}"
 }
@@ -322,6 +333,17 @@ rpivoid_p1_fix_audio_bug() {
     sudo sed -i'.tmp' '/dtparam/s|^\#*||' config.txt
     sudo rm -f config.txt.tmp
 }
+rpivoid_p1_fix_os_check() {
+    rpivoid_info "-- Disabling OS check [/boot/config.txt] ..."
+    sudo sed -i'.tmp' '$ios_check=0' config.txt
+    sudo rm -f config.txt.tmp
+}
+rpivoid_p1_fix_usbhid_bug() {
+    rpivoid_info "-- Disabling mouse poll [/boot/cmdline.txt] ..."
+    if ! sudo grep 'mousepoll' cmdline.txt; then
+        sudo sed -i'.tmp' 's|rw |rw usbhid.mousepoll=0 |g' cmdline.txt
+    fi
+}
 rpivoid_p1_rpivoid() {
     rpivoid_info "-- Creating rpivoid init script directory [/boot/rpivoid/] ..."
     sudo mkdir -p rpivoid
@@ -355,8 +377,8 @@ rpivoid_p2_hostname() {
 }
 rpivoid_p2_enable_ssh() {
     rpivoid_info "-- Enabling SSHD [/etc/runit/runsvdir/default/sshd] ..."
-    if test ! -e etc/runit/runsvdir/default/sshd;then
-        sudo ln -s /etc/sv/sshd etc/runit/runsvdir/default/sshd
+    if sudo test ! -L etc/runit/runsvdir/default/sshd; then
+        sudo ln -s /etc/sv/sshd etc/runit/runsvdir/default/sshd || true
     fi
 }
 rpivoid_p2_enable_ntpd() {
@@ -364,10 +386,17 @@ rpivoid_p2_enable_ntpd() {
         rpivoid_info "-- Enabling NTPD [/etc/runit/runsvdir/default/ntpd] ..."
         sudo sed -i".bk" 's|-\([ogu]\) chrony|-\1 root|g' etc/sv/ntpd/run
         sudo rm -f etc/sv/ntpd/run.bk
-        if test ! -e etc/runit/runsvdir/default/ntpd;then
+        if sudo test ! -L etc/runit/runsvdir/default/ntpd; then
             sudo ln -s /etc/sv/ntpd etc/runit/runsvdir/default/ntpd
         fi
     fi
+}
+rpivoid_p2_disable_fsck_emergency() {
+    rpivoid_info "-- Disabling fsck emergency shell [/etc/runit/core-services/03-filesystems.sh]"
+    sudo sed -i'.bk' '
+        s|fsck -A|fsck -y -A|g
+        /^ *emergency_shell/s|emergency_shell|: emergency_shell|g
+    ' etc/runit/core-services/03-filesystems.sh
 }
 rpivoid_p2_setup_shell() {
     rpivoid_info "-- Setting PS1,PS2,TERM in [/etc/profile.d/ps1.sh] ..."
@@ -608,22 +637,25 @@ rpivoid_setup_localtime() {
     ln -s "/usr/share/zoneinfo/${RPIVOID_TIMEZONE}" "/etc/localtime"
 }
 ## -----------------------------------------------------------------------------
-SCRNAME="`basename "$0"`"
+SCRNAME="$(basename "$0")"
 rpivoid_calc_variables
 rpivoid_error()   { echo "${SCRNAME}: error: $*"   >&2; }
 rpivoid_warning() { echo "${SCRNAME}: warning: $*" >&2; }
 rpivoid_info()    { echo "${SCRNAME}: $*"          >&2; }
 if test @"${SCRNAME}" = @"rpivoid"; then
     rpivoid "$@"
+    exit 0
 elif test @"${SCRNAME}" = @"rpivoid-h"; then
-    if test -n "$1";then
+    if test -n "$1"; then
         if test -f /boot/rpivoid.cfg; then
             . /boot/rpivoid.cfg
         fi
         rpivoid "$@"
+        exit 0
     else
         sed -n 's/^ *#h2*: \{0,1\}//p' "$0" | sed "s|\\\$0|`basename $0`|g"
         echo ""
         sed -n 's/^ *#l: \{0,2\}//p' "$0"
+        exit 0
     fi
 fi
