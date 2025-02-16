@@ -54,7 +54,7 @@
 ###:
 rpivoid() {
     ## Parse options.
-    local OPTIND optopt=
+    local OPTIND=1 optopt
     while getopts "d:f" optopt; do # OPTARG
           case $optopt in
               d)  local RPIVOID_DEVICE="${OPTARG}" ;;
