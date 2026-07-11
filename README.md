@@ -2,9 +2,15 @@
 
 ## Help
 
+ddir_rpivoid
+
+    Usage: ddir_rpivoid { html | {aarch64,armv7l,armv6l}[-musl] }
+    
+    Download RPI images for Void Linux.
+
 rpivoid
 
-    Usage: rpivoid [-d DEV][-f] ...
+    Usage: rpivoid [-d DEV][-c CFG][-f] ...
     
     This script helps installing VOID Linux in a Raspberry PI. It
     can burn an SDCARD, configure the network, enable SSH with
@@ -12,7 +18,7 @@ rpivoid
     one single step.
     
     ... show                : Show configuration.
-    ... b-r{2,3,4,5}        : Download [and burn with -d] SD Card.
+    ... {d,b}-r{2,3,4,5}    : Download [and burn with -d] SD Card.
     ... all                 : Run all operations below.
     ...   resize            : Open with cfdisk to resize partitions.
     ...   install           : Install necessary scripts, set the hostname.
@@ -36,8 +42,10 @@ rpivoid
 
 ## Collaborating
 
-For making bug reports, feature requests, support or consulting visit
-one of the following links:
+Feel free to open bug reports and feature/pull requests.
 
-1. [gemini://harkadev.com/oss/](gemini://harkadev.com/oss/)
-2. [https://harkadev.com/oss/](https://harkadev.com/oss/)
+More software like this here:
+
+1. [https://harkadev.com/prj/](https://harkadev.com/prj/)
+2. [https://devreal.org](https://devreal.org)
+

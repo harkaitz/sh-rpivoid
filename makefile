@@ -1,9 +1,12 @@
-PROJECT=sh-rpivoid
-VERSION=1.0.0
-PREFIX=/usr/local
+.POSIX: # POSIX Makefile, use make,gmake,pdpmake,bmake
+PROJECT =sh-rpivoid
+VERSION =1.0.0
+PREFIX  =/usr/local
+
 all:
 clean:
 install:
+check:
 
 ## -- BLOCK:license --
 install: install-license

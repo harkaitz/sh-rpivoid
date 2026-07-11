@@ -1,0 +1,51 @@
+#!/bin/sh -e
+##:
+#h: Usage: ddir_rpivoid { html | {aarch64,armv7l,armv6l}[-musl] }
+#h:
+#h: Download RPI images for Void Linux.
+##:
+ddir_rpivoid() {
+    local cmd="$1"
+    shift
+    case "${cmd}" in
+        html)         ddir_rpivoid_html;;
+        aarch64)      ddir_rpivoid_download aarch64      ;;
+        aarch64-musl) ddir_rpivoid_download aarch64-musl ;;
+        armv7l)       ddir_rpivoid_download armv7l       ;;
+        armv7l-musl)  ddir_rpivoid_download armv7l-musl  ;;
+        armv6l)       ddir_rpivoid_download armv6l       ;;
+        armv6l-musl)  ddir_rpivoid_download armv6l-musl  ;;
+        *) echo "error: Invalid argument: ${cmd}" >&2; return 1;;
+    esac
+}
+ddir_rpivoid_html() {
+    local html="${DDIR:-${TEMP:-/tmp}}/$(whoami)-rpivoid-$(date +%Y-%m).html"
+    if test ! -f "${html}"; then
+        wget -q -O "${html}.tmp" 'https://voidlinux.org/download/#arm%20platforms' >&2
+        mv "${html}.tmp" "${html}"
+    fi
+    cat "${html}"
+}
+ddir_rpivoid_download() {
+    url="$(ddir_rpivoid_html | sed -n "
+        s|.*\\(https://.*voidlinux.*/live/current/void-rpi-${1}-20[0-9]*\\.img\\.xz\\).*|\\1|p
+    " | head -n 1)"
+    if test ! -n "${url}"; then
+        echo "error: Can't find image for RPI ${1} in download page." >&2
+        return 1
+    fi
+    tar="${DDIR:-${TEMP:-/tmp}}/${url##*/}"
+    if test ! -f "${tar}"; then
+        wget -O "${tar}.tmp" "${url}" >&2
+        mv -v "${tar}.tmp" "${tar}"   >&2
+    fi
+    echo "${tar}"
+}
+# --------------------------------------------------------------------
+if test @"${0##*/}" = @"ddir_rpivoid"; then
+    export MSYS_NO_PATHCONV=1
+    case "${1}" in
+        ''|-h|--help) sed -n 's/^ *#h: \{0,1\}//p' "$0";;
+        *)            ddir_rpivoid "$@"; exit 0;;
+    esac
+fi

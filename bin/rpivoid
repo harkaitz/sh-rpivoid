@@ -21,7 +21,7 @@
 #L:  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 #L:  SOFTWARE.
 ###:
-#h: Usage: rpivoid [-d DEV][-f] ...
+#h: Usage: rpivoid [-d DEV][-c CFG][-f] ...
 #h:
 #h: This script helps installing VOID Linux in a Raspberry PI. It
 #h: can burn an SDCARD, configure the network, enable SSH with
@@ -29,7 +29,7 @@
 #h: one single step.
 #h:
 #h: ... show                : Show configuration.
-#h: ... b-r{2,3,4,5}        : Download [and burn with -d] SD Card.
+#h: ... {d,b}-r{2,3,4,5}    : Download [and burn with -d] SD Card.
 #h: ... all                 : Run all operations below.
 #h: ...   resize            : Open with cfdisk to resize partitions.
 #h: ...   install           : Install necessary scripts, set the hostname.
@@ -55,9 +55,10 @@
 rpivoid() {
     ## Parse options.
     local OPTIND=1 optopt
-    while getopts "d:f" optopt; do # OPTARG
+    while getopts "d:c:f" optopt; do # OPTARG
           case $optopt in
               d)  local RPIVOID_DEVICE="${OPTARG}" ;;
+              c)  . "${OPTARG}";;
               f)  local RPIVOID_FORCE=y;;
               \?) return 1;;
           esac
@@ -140,9 +141,7 @@ rpivoid_show_variables() {
     cat <<-EOF
 	RPIVOID_SCRIPT         : ${RPIVOID_SCRIPT}
 	RPIVOID_FORCE          : ${RPIVOID_FORCE}
-	RPIVOID_MIRROR         : ${RPIVOID_MIRROR}
 	RPIVOID_MOUNT          : ${RPIVOID_MOUNT}
-	RPIVOID_TMPDIR         ; ${RPIVOID_TMPDIR}
 	RPIVOID_NET_IPADDR     : ${RPIVOID_NET_IPADDR}
 	RPIVOID_NET_GATEWAY    : ${RPIVOID_NET_GATEWAY}
 	RPIVOID_NET_DNS1       : ${RPIVOID_NET_DNS1}
@@ -155,16 +154,13 @@ rpivoid_show_variables() {
 }
 rpivoid_calc_variables() {
     RPIVOID_SCRIPT="$0"
-    RPIVOID_MIRROR="https://repo-fi.voidlinux.org/live/20240314/"
     RPIVOID_DEVICE=""
-    RPIVOID_TMPDIR="/tmp/rpivoid-`whoami`"
     RPIVOID_MOUNT="/mnt/rpivoid"
-    RPIVOID_NET_DNS1="${RPIVOID_NET_DNS1:-8.8.8.8}"
-    RPIVOID_NET_DNS2="${RPIVOID_NET_DNS2:-8.8.4.4}"
-    RPIVOID_KEYBOARD="${RPIVOID_KEYBOARD:-$(setxkbmap -query | sed -n 's|^layout: *||p')}"
-    RPIVOID_TIMEZONE="${RPIVOID_TIMEZONE:-$(timedatectl | sed -n 's|^\s*Time zone: *\([^ ][^ ]*\).*|\1|p')}"
-    RPIVOID_PASSWORD="${RPIVOID_PASSWORD:-}"
-    RPIVOID_SSH_PUBKEY="${RPIVOID_SSH_PUBKEY:-${HOME}/.ssh/id_rsa.pub}"
+    : ${RPIVOID_NET_DNS1:=8.8.8.8}
+    : ${RPIVOID_NET_DNS2:=8.8.4.4}
+    : ${RPIVOID_KEYBOARD:=$(setxkbmap -query | sed -n 's|^layout: *||p')}
+    : ${RPIVOID_TIMEZONE:=$(timedatectl | sed -n 's|^\s*Time zone: *\([^ ][^ ]*\).*|\1|p')}
+    : ${RPIVOID_SSH_PUBKEY:=${HOME}/.ssh/id_rsa.pub}
     export PATH="${PATH}:/sbin:/usr/sbin"
 }
 rpivoid_check_programs() {
@@ -183,28 +179,9 @@ rpivoid_check_programs() {
     return "${ret}"
 }
 ## -------------------------------------------------------------------
-rpivoid_get_xz_filename() {
-    curl -s "${RPIVOID_MIRROR}" | sed -n '
-    s|^<a  *href="\([^"]*'"${1}"'[^"]*\.img\.xz\)".*|\1|p
-    '
-}
 rpivoid_get_RPIVOID_XZFILE() { # REGEX
     if test ! -n "${RPIVOID_XZFILE}"; then
-        local xz_regex="$1"
-        local xz_name="`rpivoid_get_xz_filename "${xz_regex}"`"
-        local xz_url="${RPIVOID_MIRROR}/${xz_name}"
-        local xz_file="${RPIVOID_TMPDIR}/${xz_name}"
-        if test ! -n "${xz_name}"; then
-            rpivoid_error "Can't find an iso matching '${xz_regex}' in voidlinux repo."
-            return 1
-        fi
-        if test ! -f "${xz_file}"; then
-            rpivoid_info "Downloading ${xz_url} ..."
-            mkdir -p "`dirname "${xz_file}"`"       >&2
-            curl -s -o "${xz_file}.tmp" "${xz_url}" >&2
-            mv "${xz_file}.tmp" "${xz_file}"        >&2
-        fi
-        RPIVOID_XZFILE="${xz_file}"
+        RPIVOID_XZFILE="$(ddir_rpivoid "$1")"
     fi
 }
 rpivoid_get_RPIVOID_DEVICE() {
@@ -270,25 +247,25 @@ rpivoid_mount_run() { # PART CHKFILE COMMAND...
 ## -----------------------------------------------------------------------------
 rpivoid_burn_r2() {
     rpivoid_check_programs
-    rpivoid_get_RPIVOID_XZFILE 'void-rpi-armv7l-20'
+    rpivoid_get_RPIVOID_XZFILE 'armv7l'
     rpivoid_get_RPIVOID_DEVICE
     rpivoid_burn "${RPIVOID_DEVICE}" "${RPIVOID_XZFILE}"
 }
 rpivoid_burn_r3() {
     rpivoid_check_programs
-    rpivoid_get_RPIVOID_XZFILE 'void-rpi-aarch64-20'
+    rpivoid_get_RPIVOID_XZFILE 'aarch64'
     rpivoid_get_RPIVOID_DEVICE
     rpivoid_burn "${RPIVOID_DEVICE}" "${RPIVOID_XZFILE}"
 }
 rpivoid_burn_r4() {
     rpivoid_check_programs
-    rpivoid_get_RPIVOID_XZFILE 'void-rpi-aarch64-20'
+    rpivoid_get_RPIVOID_XZFILE 'aarch64'
     rpivoid_get_RPIVOID_DEVICE
     rpivoid_burn "${RPIVOID_DEVICE}" "${RPIVOID_XZFILE}"
 }
 rpivoid_burn_r5() {
     rpivoid_check_programs
-    rpivoid_get_RPIVOID_XZFILE 'void-rpi-aarch64-20'
+    rpivoid_get_RPIVOID_XZFILE 'aarch64'
     rpivoid_get_RPIVOID_DEVICE
     rpivoid_burn "${RPIVOID_DEVICE}" "${RPIVOID_XZFILE}"
 }
